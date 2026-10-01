@@ -1,0 +1,59 @@
+# Data Principles
+
+**Status:** Proposed. Schemas are designed per feature (by `data-engineer`) after requirements are confirmed; this page holds the rules every schema follows.
+
+## Database
+PostgreSQL (version fixed in ADR-0004). One database; tenancy per `tenancy.md`.
+
+## Conventions
+- **Primary keys:** UUID (v7 preferred for index locality) on all tables. Not guessable, safe to expose.
+- **Tenant key:** `tenant_id uuid not null` on every tenant-owned table; leading column in tenant-scoped indexes and unique constraints.
+- **Money:** `numeric(12,2)` in the restaurant's currency (or integer minor units — decide in ADR during Phase 1 with Q1/Q15). Never floating point. Rounding rules live in one billing function.
+- **Quantities:** `numeric` with explicit scale per unit type.
+- **Time:** `timestamptz`, stored UTC; the restaurant's timezone is a setting used for display and business-day boundaries.
+- **Status fields:** constrained to known values (`CHECK` or enum) and changed only via state-machine commands.
+- **Timestamps:** `created_at`, `updated_at` on mutable tables; ledgers have `created_at` only.
+
+## Integrity
+- Invariants enforced by constraints where expressible, and by services always.
+- Business FKs `RESTRICT`/`PROTECT` on delete. History is never cascaded away.
+- Values that must not change retroactively are snapshotted (item name/price/tax at order time).
+- Ledgers (payments, stock movements, audit) are append-only; corrections are compensating rows.
+
+## Deletion
+- Default: hard delete for data nothing references.
+- Deactivation (`is_active` / `archived_at`) for catalog-like data referenced by history (menu items, staff memberships, tables). Deactivated rows are excluded from active queries explicitly — not by a hidden default manager.
+- Personal-data erasure: see "Retention" below (C6.8).
+
+## Retention (C6.8) — Proposed, principles only
+Change 0002, Track D2. No schemas here; `data-engineer` designs the mechanism with `security-engineer`. C6.8: orders, payments and audit records are kept 7 years; staff personal data is minimized after membership removal.
+
+**Retention classes.** Each tenant-owned table is assigned one class in a data register kept by `data-engineer`. Every column holding personal data is marked in the same register.
+| Class | Examples | Rule |
+|---|---|---|
+| Business record | orders, lines, tickets, voids, payments, bills, stock movements, audit events | Kept ≥ 7 years from the record's final date (closed/cancelled/occurred), then eligible for purge |
+| Configuration | menu, tables, roles, devices, settings | Kept while referenced by a business record; otherwise normal delete/deactivate rules above |
+| Personal data of staff | membership display name, contact, notes; the User's name/email/phone | Minimized after membership removal (below) |
+| Credentials and sessions | sessions, reset tokens, invitation tokens | Deleted on expiry, revocation or use. Never retained |
+
+**Minimization after removal.**
+- Business records reference actors by **ID only** (membership ID, device ID, `actor_type`), never by copied names or emails. Minimization therefore never rewrites a business record or an append-only ledger.
+- Minimization runs per **membership**, because it is tenant-owned. It overwrites that membership's personal fields in place with a neutral label, and keeps the row so FKs (RESTRICT) and attribution still hold. Which fields, when (immediately or after a grace period) and how the actor is displayed afterwards are still open (`authorization.md`). The brief's default "history keeps the original name" (Q40) conflicts with this (AQ8 = Q79, open).
+- The platform-level **User** is minimized, or deleted, only when it has no remaining non-removed membership in any restaurant (C2.4). A removal in restaurant A never touches the person's data in restaurant B.
+- Audit `before`/`after` payloads for staff personal data follow C6.22 (product owner, 2026-09-30): name and contact changes record the field name and "changed", without values; role, permission, status and device-profile changes record full old and new values; login identifier (email/username) changes record a keyed hash of old and new.
+- Customer personal data (takeaway name/phone, Q67) gets its own class once Q67 is answered.
+
+**Mechanism principles.**
+- The scheduler enqueues one retention job per tenant (C3-8). Each job sets tenant context and works only under RLS (TM-24). Jobs are idempotent, batched and resumable.
+- Every minimization is itself an audit event (actor type `system`), with no personal values in the payload.
+- Minimization is a service in `access` (memberships) and `identity` (users). No raw SQL rewrites and no triggers.
+- **Purge after 7 years is not built in v1.** No record reaches 7 years before 2033. Purging business records is a data deletion (`APPROVAL`). It also needs a narrowly granted path, because the app role has no DELETE on audit tables (TM-18). It must be designed and approved before the first record becomes eligible.
+- Restaurant closure (Q39) does not shorten retention. Closed tenants' records follow the same classes.
+- Backups: minimized or purged data survives only until backup rotation. The backup retention period (Phase 10) is stated in the privacy notice.
+- Tests: after minimization, no personal value of the removed membership is readable through any API or report, and history still shows a stable actor label. The same user's membership in another tenant is unchanged.
+
+## Concurrency toolbox
+DB constraints (uniqueness, check) · row locks (`SELECT … FOR UPDATE`) for read-modify-write · optimistic `version` columns for user edits · idempotency keys for retried creates · advisory locks only with a written reason.
+
+## Performance
+Every list is paginated; every tenant-scoped access path has an index; reports run on bounded date ranges and are checked with `EXPLAIN ANALYZE` on realistic volumes.
