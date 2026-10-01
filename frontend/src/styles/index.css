@@ -1,0 +1,45 @@
+@import "tailwindcss";
+
+/*
+ * Design tokens (placeholder palette; branding is a human decision).
+ * Pairs used for text meet WCAG AA contrast: ink on surface, ink-muted on surface,
+ * on-brand on brand.
+ */
+@theme {
+  --color-brand: #0f766e;
+  --color-on-brand: #ffffff;
+  --color-surface: #ffffff;
+  --color-ink: #111827;
+  --color-ink-muted: #374151;
+  --color-line: #d1d5db;
+}
+
+@layer base {
+  html {
+    /* Body text never below 16px; respects the user's text-scaling setting. */
+    font-size: 100%;
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+  }
+
+  body {
+    @apply bg-surface text-base text-ink antialiased;
+    font-family:
+      system-ui,
+      -apple-system,
+      "Segoe UI",
+      Roboto,
+      sans-serif;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

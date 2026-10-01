@@ -1,0 +1,34 @@
+# Dependency update PRs (security control 18, SC-39).
+# No auto-merge: every update PR is reviewed and must pass CI like any change.
+# cooldown delays version updates by 7 days (malicious-release window);
+# security updates are not delayed.
+version: 2
+updates:
+  - package-ecosystem: uv
+    directory: /backend
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+
+  # compose.yaml: the postgres image digest.
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7

@@ -1,0 +1,8 @@
+# zizmor configuration (SC-30..SC-33). Run with `make workflow-lint`.
+# Any rule disabled or relaxed here is a security-engineer REVIEW.
+rules:
+  unpinned-uses:
+    config:
+      policies:
+        # Every action, first-party actions/* included, must be pinned to a commit SHA.
+        "*": hash-pin

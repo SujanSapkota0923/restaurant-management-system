@@ -1,0 +1,137 @@
+# RMS CI (change 0003, 6.7 + SC-30..SC-37).
+# Policy, enforced by `make workflow-lint` (zizmor + scripts/ci/check-workflows.sh):
+#   - triggers: push and pull_request only;
+#   - permissions: contents: read at workflow level; no job raises it; no secrets.*;
+#   - every checkout has persist-credentials: false;
+#   - every `uses:` is pinned to a full commit SHA with a version comment;
+#   - no ${{ }} expressions inside `run:`;
+#   - no artifact upload of the workspace or env file; no env/printenv/compose config.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_VERSION: "0.11.10"
+
+jobs:
+  backend:
+    name: backend
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: false
+      - name: Install backend dependencies (fails on lock drift)
+        run: make install-backend
+      - name: Generate a per-run env file (random secrets, never printed)
+        run: make init-env
+      - name: Mask generated secrets
+        run: |
+          while IFS='=' read -r key value; do
+            case "$key" in
+              *PASSWORD|DJANGO_SECRET_KEY) echo "::add-mask::${value}" ;;
+            esac
+          done < .env
+      - name: Start PostgreSQL
+        run: make up
+      - name: Database assertions (loopback port, password auth, bootstrap re-run)
+        run: make db-check
+      - name: Lint and format check
+        env:
+          REQUIRE_SHELLCHECK: "1"
+        run: make lint-backend lint-shell
+      - name: Type-check
+        run: make typecheck-backend
+      - name: Migration check
+        run: make migrations-check
+      - name: Tests (as the app role, against PostgreSQL)
+        run: make test-backend
+      - name: Production settings check --deploy
+        run: make deploy-check
+      - name: Working tree is clean (env file ignored, nothing generated)
+        run: |
+          status="$(git status --porcelain)"
+          if [ -n "$status" ]; then
+            echo "Unexpected changes in the working tree:"
+            echo "$status"
+            exit 1
+          fi
+      - name: Database logs on failure
+        if: failure()
+        run: docker compose logs db
+
+  frontend:
+    name: frontend
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: frontend/.nvmrc
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend dependencies (no install scripts)
+        run: make install-frontend
+      - name: Lint and format check
+        run: make lint-frontend
+      - name: Type-check
+        run: make typecheck-frontend
+      - name: Tests
+        run: make test-frontend
+      - name: Build
+        run: make build-frontend
+      - name: Secret scan of the built bundle
+        run: make secrets-dist
+
+  audit:
+    name: audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: frontend/.nvmrc
+      - name: Dependency audit (reads lockfiles; installs nothing into the project)
+        run: make audit
+
+  secrets:
+    name: secrets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: false
+      - name: Secret scan of the full history (redacted)
+        run: make secrets
+      - name: Workflow lint (zizmor + policy check)
+        run: make workflow-lint

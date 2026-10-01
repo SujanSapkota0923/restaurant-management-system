@@ -1,0 +1,55 @@
+[project]
+name = "rms-backend"
+version = "0.0.0"
+description = "RMS backend (Django + DRF)"
+requires-python = ">=3.12"
+dependencies = [
+    "django>=5.2,<5.3",
+    "djangorestframework>=3.16,<4",
+    "psycopg[binary]>=3.2,<4",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3,<10",
+    "pytest-django>=4.9,<5",
+    "ruff==0.16.9",
+    "mypy>=1.15,<2",
+    "django-stubs[compatible-mypy]>=5.2,<6",
+    "djangorestframework-stubs[compatible-mypy]>=3.16,<4",
+]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "S", "DJ", "SIM", "RUF", "N"]
+
+[tool.ruff.lint.per-file-ignores]
+# Settings modules layer on top of base with star imports by design.
+"config/settings/*.py" = ["F403", "F405"]
+# Tests use assert; subprocess calls in tests run fixed argv lists we control.
+"**/tests/**" = ["S101", "S603", "S607"]
+"conftest.py" = ["S101"]
+
+[tool.mypy]
+strict = true
+python_version = "3.12"
+plugins = ["mypy_django_plugin.main", "mypy_drf_plugin.main"]
+exclude = ["^\\.venv/"]
+
+[tool.django-stubs]
+django_settings_module = "config.settings.test"
+
+[tool.pytest.ini_options]
+# --ds on the command line outranks an inherited DJANGO_SETTINGS_MODULE (the env
+# file sets it to the local module), so tests always use config.settings.test.
+addopts = ["--ds=config.settings.test", "--strict-markers", "-ra"]
+testpaths = ["config", "rms"]
+markers = [
+    "slow: test waits on a real network timeout (still runs by default)",
+]

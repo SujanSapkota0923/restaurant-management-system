@@ -1,0 +1,41 @@
+# Local development and CI database (change 0003, 6.5).
+#
+# Values are interpolated from the root env file (created by `make init-env`).
+# The db container receives only the variables it needs, through an explicit
+# mapping: never the whole env file, never DJANGO_SECRET_KEY (SC-28).
+# Do not run `docker compose config` in CI or in a make target CI calls: it
+# prints interpolated secrets.
+name: rms
+
+services:
+  db:
+    # postgres:16 pinned by digest (SC-28/SC-32); Dependabot proposes updates.
+    image: postgres:16@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run make init-env first}
+      POSTGRES_HOST_AUTH_METHOD: scram-sha-256
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+      DB_NAME: ${DB_NAME:?run make init-env first}
+      DB_APP_USER: ${DB_APP_USER:?run make init-env first}
+      DB_APP_PASSWORD: ${DB_APP_PASSWORD:?run make init-env first}
+      DB_MIGRATOR_USER: ${DB_MIGRATOR_USER:?run make init-env first}
+      DB_MIGRATOR_PASSWORD: ${DB_MIGRATOR_PASSWORD:?run make init-env first}
+    ports:
+      # Loopback only, never all interfaces (SC-23).
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+      - ./scripts/db/bootstrap.sh:/docker-entrypoint-initdb.d/10-bootstrap.sh:ro
+    healthcheck:
+      # TCP, not the socket: during initdb the temporary server listens on the
+      # socket only, so this turns healthy only after bootstrap has finished.
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "postgres", "-d", "postgres"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+volumes:
+  db-data:
