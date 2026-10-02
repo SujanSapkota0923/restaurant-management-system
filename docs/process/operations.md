@@ -18,13 +18,15 @@ local (Docker) → CI (ephemeral) → staging (production-like, fake data) → p
 | `make lint` / `make fmt` | ruff + shellcheck + ESLint/Prettier checks / autofix |
 | `make typecheck` | mypy (strict) and `tsc -b --noEmit` |
 | `make test` | pytest (as the app role) and Vitest |
-| `make migrations-check` | `makemigrations --check --dry-run` |
+| `make migrations-check` | `makemigrations --check --dry-run`, with the local and with the test settings (the test settings add the test-only probe app) |
+| `make migrations-roundtrip` | On a throwaway DB `rms_roundtrip` (created by the migrator from `rms_template`, ACL locked down, dropped at the end): migrate up, reverse every app to zero, check nothing is left, migrate up again, run the catalog check. Refuses any other DB name and never connects to the dev DB (change 0004) |
+| `make catalog-check` | The tenant-isolation catalog check on the dev DB, read-only, as the app role. Needs `make migrate` first; zero tenant tables is allowed there (change 0004) |
 | `make deploy-check` | `check --deploy --fail-level WARNING` on the production settings with throwaway values; it must also refuse `DJANGO_DEBUG=true` |
 | `make audit` | pip-audit and npm audit (reads lockfiles only) |
 | `make secrets` / `make secrets-staged` / `make secrets-dist` | gitleaks over the git history / over staged changes (run before every commit) / over the built `frontend/dist` (run `make build-frontend` first) |
 | `make workflow-lint` | zizmor, the workflow policy script on the real workflows, and the script's self-test (`scripts/ci/test-check-workflows.sh`: every fixture in `scripts/ci/testdata/` must be rejected) |
 | `make db-check` / `make db-bootstrap` | DB assertions (below) / re-run the role bootstrap (idempotent) |
-| `make check` | All checks CI runs except the DB assertions (`make db-check`); shellcheck is skipped if not installed (CI requires it) |
+| `make check` | All checks CI runs except the DB assertions (`make db-check`) and `make catalog-check` (it needs a migrated dev DB; the same check runs in the tests and the round trip); shellcheck is skipped if not installed (CI requires it) |
 
 **Env file.** Backend commands load it with `uv run --env-file`; there is no dotenv dependency. Values in the shell environment take precedence over the file. Never commit it (`.gitignore`), never print it. Never run `docker compose config`, because it prints interpolated secrets. To rotate local secrets, stop the stack, delete the env file and the DB volume (`docker compose down -v`, which deletes local data), then run `make setup` again.
 
@@ -34,14 +36,17 @@ local (Docker) → CI (ephemeral) → staging (production-like, fake data) → p
   - `rms_migrator`: LOGIN, CREATEDB (local/CI only, for the test DB), no superuser/createrole/bypassrls;
   - `rms_app`: LOGIN, NOINHERIT, member of nothing, no createdb/createrole/bypassrls, `statement_timeout=15s`, `idle_in_transaction_session_timeout=30s`;
   - `rms_template`, owned by the migrator: `public` is owned by the migrator, PUBLIC has no access, the app role has USAGE, and default privileges give the app role DML on the migrator's tables and sequences;
-  - the dev DB `rms`, created from the template, with CONNECT for the two roles only.
+  - the dev DB `rms`, created from the template, with CONNECT for the two roles only;
+  - the maintenance DBs locked down (change 0004): PUBLIC has no privilege on `postgres` or `template1`, the migrator keeps CONNECT on `postgres` (Django connects there to create and drop the test and round-trip DBs), and the app role can connect to neither.
+- A bootstrap change reaches an existing container only after `make down` and `make up` (the script is a single-file bind mount, which keeps pointing at the old file after an editor replaces it; the data volume is kept), followed by `make db-bootstrap`.
 - Passwords reach psql only through `\getenv` (never argv). Statement logging is off for the bootstrap session, and errors are printed tersely, so a failing statement is not echoed.
 - Tests create `test_rms` from the template as the migrator, then connect as the app role (`docs/conventions/backend.md` "Tests").
 
-## CI (as built in change 0003)
+## CI (as built in changes 0003 and 0004)
 - `.github/workflows/ci.yml`, four jobs: `backend`, `frontend`, `audit`, `secrets` (contents in `docs/process/testing-strategy.md`). Triggers are `push` and `pull_request` only. `permissions: contents: read`, no job raises it, no `secrets.*`. Every checkout uses `persist-credentials: false`. Superseded runs are cancelled. Each job has a timeout.
 - CI runs PostgreSQL through the same `compose.yaml` as local development, with an env file generated per run. The generated secrets are registered with `::add-mask::`. Nothing else prints them. On failure, only `docker compose logs db` is printed.
-- DB assertions (`scripts/ci/db-check.sh`): the port is bound to `127.0.0.1` only; a TCP login as the app role with a wrong password is rejected; re-running the bootstrap leaves roles, memberships, database/schema ACLs and default privileges unchanged.
+- DB assertions (`scripts/ci/db-check.sh`): the port is bound to `127.0.0.1` only; a TCP login as the app role with a wrong password is rejected; re-running the bootstrap leaves roles, memberships, database/schema ACLs and default privileges unchanged; `postgres` and `template1` grant nothing to PUBLIC and the app role cannot connect to them.
+- Migrations and isolation (change 0004): `make migrations-check` (local and test settings), then `make migrate` on the per-run dev DB, `make catalog-check` on it, and `make migrations-roundtrip`, before the tests.
 - After the tests, the working tree must be clean (`git status --porcelain`).
 - **Pins** (SC-32). Every action is pinned to a commit SHA with a version comment. Resolve a new SHA with `git ls-remote https://github.com/<owner>/<repo> refs/tags/<tag>`; never type one by hand. Images are pinned by digest: postgres in `compose.yaml`, gitleaks in the `Makefile`. Read a digest with `docker pull <image>:<tag>` then `docker inspect --format '{{json .RepoDigests}}' <image>:<tag>`. The uv, pip-audit and zizmor versions are exact (`ci.yml` `UV_VERSION`, `Makefile`).
 - **Workflow lint** (SC-30..33). zizmor runs with `.github/zizmor.yml` (hash-pin for every action), plus `scripts/ci/check-workflows.sh` (forbidden triggers in block or inline `on:` form, permissions, secrets, persisted credentials, pins, `${{ }}` in `run:`, artifact upload, env dumps such as `env`, `printenv`, bare `set`/`export`/`declare`, `export -p`, `declare -p`, `compgen -v`, and printing an env file with `cat`/`head`/`tail` and similar). The script is line-based; its self-test runs one bad-workflow fixture per rule from `scripts/ci/testdata/` (never under `.github/workflows/`, where GitHub would run them), and each must fail with its expected message. A rule change comes with a fixture. Relaxing either is a security-engineer `REVIEW`.

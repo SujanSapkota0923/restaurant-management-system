@@ -2,7 +2,7 @@
 
 Multi-tenant, mobile-first B2B restaurant management platform.
 
-**Status:** Phase 2 (foundations). The backend and frontend scaffold, local development environment and CI exist (change 0003); there are no domain features yet. See `docs/product/roadmap.md`.
+**Status:** Phase 2 (foundations). The backend and frontend scaffold, local development environment and CI exist (change 0003), plus the tenancy foundation: tenant registry, tenant context, RLS and the isolation harness (change 0004); there are no domain features yet. See `docs/product/roadmap.md`.
 
 ## Setup
 Prerequisites: Docker with Compose v2, [uv](https://docs.astral.sh/uv/), Node 24 or newer, openssl, GNU make, bash.
@@ -10,10 +10,10 @@ Prerequisites: Docker with Compose v2, [uv](https://docs.astral.sh/uv/), Node 24
 ```sh
 make setup   # env file with random secrets, dependencies, PostgreSQL, migrations
 make run     # backend on http://127.0.0.1:8000, frontend dev server (Vite)
-make check   # all checks CI runs except the DB assertions: lint, typecheck, migrations, tests, deploy check, audit, secrets, build, bundle scan, workflow lint
+make check   # all checks CI runs except the DB assertions: lint, typecheck, migrations (incl. round trip), tests, deploy check, audit, secrets, build, bundle scan, workflow lint
 ```
 
-`make check` leaves out the DB assertions (run `make db-check`), and skips shellcheck if it is not installed (CI requires it).
+`make check` leaves out the DB assertions (run `make db-check`) and the dev-DB catalog check (`make catalog-check`, after `make migrate`), and skips shellcheck if it is not installed (CI requires it). It does run the migration round trip, on a throwaway database.
 
 - `make setup` creates the gitignored env file at the repo root from `.env.example`, replacing each placeholder secret with a random value. It never prints the values and never overwrites an existing file. Do not commit, print or share it.
 - PostgreSQL 16 runs in Docker on `127.0.0.1:5432` only. Tests connect as the non-privileged app role to a separate `test_rms` database. `make up` / `make down` start and stop it (`down` keeps the data).

@@ -20,6 +20,7 @@ DEBUG = False
 INSTALLED_APPS = [
     "rest_framework",
     "rms.core",
+    "rms.tenancy",
 ]
 
 MIDDLEWARE = [
@@ -43,12 +44,17 @@ DATABASES: dict[str, dict[str, object]] = {
         "NAME": env.require_str("DB_NAME"),
         "USER": env.require_str("DB_APP_USER"),
         "PASSWORD": env.require_str("DB_APP_PASSWORD"),
-        # No persistent connections until the C3-2 reuse test exists (0004).
+        # Stays 0: raising it is a Phase 10 decision (the C3-2 reuse test exists since 0004).
         "CONN_MAX_AGE": 0,
         # Bounded connect time: an unreachable DB must not hang workers (SC-10).
         "OPTIONS": {"connect_timeout": 5},
     }
 }
+
+# The role that tenant-table grants and the django_migrations lock-down apply to
+# (change 0004, C-11). Required, no default; the migration operations check it
+# against the bootstrap name pattern and pg_roles before granting anything.
+RMS_DB_APP_ROLE = env.require_str("DB_APP_USER")
 
 LANGUAGE_CODE = "en-us"
 TIME_ZONE = "UTC"

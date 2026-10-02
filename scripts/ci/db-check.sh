@@ -4,6 +4,8 @@
 #   2. A TCP login as the app role with a wrong password is rejected.
 #   3. Re-running bootstrap succeeds and leaves role attributes, memberships,
 #      database/schema ACLs and default privileges unchanged.
+#   4. The postgres and template1 DBs grant nothing to PUBLIC, and the app role
+#      cannot connect to them (change 0004, C-19).
 # Prints no secret: it never reads the env file; the container already holds
 # the variables it needs.
 set -euo pipefail
@@ -59,3 +61,27 @@ if [[ "$before" != "$after" ]]; then
   exit 1
 fi
 echo "db-check: bootstrap re-run is idempotent"
+
+# 4. Maintenance DBs (change 0004, C-19): no PUBLIC entry in the ACL (a NULL
+#    ACL means the defaults, which include PUBLIC CONNECT and TEMP), and the
+#    app role can neither connect nor create temp tables there. The query
+#    prints one line per problem; no output means pass.
+# shellcheck disable=SC2016
+problems="$("${dc[@]}" exec -T db sh -c \
+  'psql -X -At -U postgres -d postgres -v app="$DB_APP_USER" -f -' <<'SQL'
+SELECT d.datname || ': PUBLIC holds a privilege' FROM pg_database d
+WHERE d.datname IN ('postgres', 'template1')
+  AND (d.datacl IS NULL OR EXISTS (SELECT 1 FROM aclexplode(d.datacl) x WHERE x.grantee = 0));
+SELECT d.datname || ': the app role has ' || p.priv FROM pg_database d,
+  (VALUES ('CONNECT'), ('TEMP')) AS p(priv)
+WHERE d.datname IN ('postgres', 'template1') AND has_database_privilege(:'app', d.datname, p.priv);
+SELECT 'a maintenance DB is missing'
+WHERE (SELECT count(*) FROM pg_database WHERE datname IN ('postgres', 'template1')) <> 2;
+SQL
+)"
+if [[ -n "$problems" ]]; then
+  echo "db-check: maintenance DB ACLs are not locked down:" >&2
+  echo "$problems" >&2
+  exit 1
+fi
+echo "db-check: postgres and template1 grant nothing to PUBLIC or the app role"

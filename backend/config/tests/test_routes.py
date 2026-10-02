@@ -4,6 +4,11 @@ Every resolvable route is either in ``PUBLIC_ROUTES`` (each entry needs a
 threat-model entry in a change record) or a DRF view that itself declares a
 non-``AllowAny`` permission. Relying on the DenyAll default does not count as
 declaring.
+
+Tenant routes (change 0004, C-5(c)): every route with ``tenant_id`` is exactly
+``api/v1/r/<uuid:tenant_id>/...``, served by a ``TenantAPIView`` that declares a
+non-``AllowAny`` permission; a ``TenantAPIView`` is never routed without it; and
+``config.urls`` has no tenant route at all in 0004.
 """
 
 from __future__ import annotations
@@ -17,6 +22,8 @@ from django.test import Client
 from django.urls import URLPattern, URLResolver, get_resolver
 from rest_framework.permissions import AllowAny, BasePermission
 from rest_framework.views import APIView
+
+from rms.tenancy.api.views import TenantAPIView
 
 # Adding an entry needs a threat-model entry (change 0003, T3-09/T3-10).
 PUBLIC_ROUTES = frozenset({"health/live", "health/ready"})
@@ -73,6 +80,59 @@ def route_violations(urlconf: str) -> list[str]:
         for route in sorted(PUBLIC_ROUTES - seen_public)
     )
     return violations
+
+
+TENANT_ROUTE_PREFIX = "api/v1/r/<uuid:tenant_id>/"
+
+
+def tenant_route_violations(urlconf: str) -> list[str]:
+    violations: list[str] = []
+    for route, callback in iter_routes(get_resolver(urlconf).url_patterns):
+        view_cls = getattr(callback, "cls", None)
+        initkwargs = getattr(callback, "initkwargs", {}) or {}
+        is_tenant_view = isinstance(view_cls, type) and issubclass(view_cls, TenantAPIView)
+        if "tenant_id" not in route:
+            if is_tenant_view:
+                violations.append(f"{route}: TenantAPIView routed without <uuid:tenant_id>")
+            continue
+        if not route.startswith(TENANT_ROUTE_PREFIX) or route.count("tenant_id") != 1:
+            violations.append(f"{route}: tenant routes must start with {TENANT_ROUTE_PREFIX}")
+        if not is_tenant_view:
+            violations.append(f"{route}: tenant routes must be served by a TenantAPIView")
+            continue
+        assert isinstance(view_cls, type)
+        permissions = _declared(view_cls, initkwargs, "permission_classes")
+        if not permissions or not all(_is_plain_non_allowany(p) for p in permissions):
+            violations.append(f"{route}: must declare a non-AllowAny permission")
+    return violations
+
+
+def tenant_routes(urlconf: str) -> list[str]:
+    return [r for r, _ in iter_routes(get_resolver(urlconf).url_patterns) if "tenant_id" in r]
+
+
+def test_root_urlconf_has_no_tenant_routes_in_0004() -> None:
+    assert tenant_routes(settings.ROOT_URLCONF) == []
+    assert tenant_route_violations(settings.ROOT_URLCONF) == []
+
+
+def test_probe_tenant_routes_pass_both_scans() -> None:
+    assert len(tenant_routes("rms.tenancy.tests.probe.urls")) == 2
+    assert tenant_route_violations("rms.tenancy.tests.probe.urls") == []
+    assert route_violations("rms.tenancy.tests.probe.urls") == []
+
+
+def test_tenant_route_scan_flags_bad_routes() -> None:
+    """Self-test (N-02): each route in the bad URLconf breaks one rule."""
+    violations = tenant_route_violations("rms.tenancy.tests.probe.bad_urls")
+    flagged = {v.split(": ")[0] for v in violations}
+    assert flagged == {
+        "api/v1/r/<str:tenant_id>/bad/str",
+        "api/v1/bad/no-tenant",
+        "v2/<uuid:tenant_id>/bad/prefix",
+        "api/v1/r/<uuid:tenant_id>/bad/plain",
+        "api/v1/r/<uuid:tenant_id>/bad/open",
+    }
 
 
 def test_root_urlconf_has_no_open_routes() -> None:

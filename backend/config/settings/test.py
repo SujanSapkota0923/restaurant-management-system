@@ -53,3 +53,7 @@ DATABASES["migrator"] = {
     "TEST": {"NAME": TEST_DB_NAME, "TEMPLATE": TEST_DB_TEMPLATE, "DEPENDENCIES": []},
 }
 DATABASES["default"]["TEST"] = {"MIRROR": "migrator"}
+
+# Test-only tenant tables (change 0004, D6). Never installed in local or
+# production settings (C-18); its migrations never reach the dev DB.
+INSTALLED_APPS = [*INSTALLED_APPS, "rms.tenancy.tests.probe"]

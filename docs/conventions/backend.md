@@ -1,6 +1,6 @@
 # Backend Conventions
 
-**Status:** Proposed. The "Django + DRF" section describes the scaffold as built in change 0003 (ADR-0004). Items marked **Planned** arrive with the change named.
+**Status:** Proposed. The "Django + DRF" section describes the scaffold as built in change 0003 (ADR-0004) and the tenancy foundation built in change 0004. Items marked **Planned** arrive with the change named.
 
 ## Stack-agnostic
 - Module per bounded context (`domain-model.md`), each with `api`, `services`, `domain`, `data` layers (`overview.md`).
@@ -12,17 +12,17 @@
 - Background jobs: JSON payloads with `tenant_id`; set tenant context before querying; idempotent; retries with backoff.
 - Time: all logic in UTC; business-day boundaries computed with the restaurant timezone.
 
-## Django + DRF (ADR-0004, as built in change 0003)
+## Django + DRF (ADR-0004, as built in changes 0003 and 0004)
 
 ### Versions and tooling
 - Python 3.12 (`backend/.python-version`, `requires-python >=3.12`), managed with **uv**. `backend/uv.lock` is committed. Install with `uv sync --locked`; every `make` target uses `uv run --locked`, so lock drift fails.
 - Runtime (locked): Django 5.2.17 (LTS line, `>=5.2,<5.3`), Django REST Framework 3.18.1, psycopg 3.3.6 (`psycopg[binary]`; source build vs. binary wheel for production is decided in Phase 10).
-- Dev (locked): pytest 9.1.1, pytest-django 4.14.0, ruff 0.16.9 (exact pin), mypy 1.19.1, django-stubs 5.2.9, djangorestframework-stubs 3.16.9.
+- Dev (locked): pytest 9.1.1, pytest-django 4.14.0, ruff 0.16.9 (exact pin), mypy 1.19.1, django-stubs 5.2.9, djangorestframework-stubs 3.16.9, factory-boy 3.3.3 (0004; pulls in Faker 40.40.0, which the factories do not use). factory_boy has no complete type hints: only `rms/tenancy/tests/factories.py` calls it (mypy override there), and tests use its typed `make_*` functions.
 - Deliberately not used: django-environ, structlog, python-json-logger, dj-database-url, django-cors-headers, gunicorn, celery/redis, whitenoise. Adding a dependency needs the design to list it (`REVIEW`).
 - **ruff:** line length 100; rules `E,W,F,I,B,UP,S,DJ,SIM,RUF,N`. Tests ignore `S101` (assert) and `S603/S607` (fixed-argv subprocess). Settings modules ignore `F403/F405` (star import of `base`). Any other `noqa` names its rule and a reason.
 - **mypy:** `strict = true`, with the django-stubs and DRF-stubs plugins on `config.settings.test`. Runs with the env file loaded (`make typecheck-backend`).
 - **pip-audit** 2.10.1 through `uvx`, on the exported lockfile (`make audit-backend`).
-- Commands: `make lint-backend`, `make fmt-backend`, `make typecheck-backend`, `make test-backend` (`PYTEST_ARGS=...` passes extra arguments), `make migrations-check`, `make deploy-check`.
+- Commands: `make lint-backend`, `make fmt-backend`, `make typecheck-backend`, `make test-backend` (`PYTEST_ARGS=...` passes extra arguments; includes the catalog check), `make migrations-check` (local and test settings), `make migrations-roundtrip` (throwaway DB), `make catalog-check` (migrated dev DB, read-only), `make deploy-check`.
 
 ### Layout
 - `backend/config/`: the project. `settings/{base,local,test,production}.py`, `env.py` (typed env readers), `validation.py` (`validate_production`), `urls.py`, `wsgi.py`.
@@ -50,7 +50,46 @@
 - **CSRF carry-forward (SC-15):** DRF views are `csrf_exempt`, and DRF enforces CSRF only inside `SessionAuthentication` for an authenticated user. **0005 must enforce CSRF on every unsafe method, authenticated or anonymous (C6-3/TM-03), and test it on a DRF view.** `CsrfViewMiddleware` stays installed. `CSRF_FAILURE_VIEW` returns the envelope.
 - DRF viewsets only for plain resources. Command endpoints are explicit actions. Serializers allow-list fields (`fields = [...]`, never `__all__`).
 - **Planned (0006):** each view declares its `required_permission` code, checked by the single authorization helper.
-- **Planned (0004):** the tenant-scoped model manager is the default manager on tenant models; there is no unscoped `objects` for tenant models.
+- Tenant views: see "Tenant plane" below.
+
+### Tenant plane (change 0004)
+Design: `docs/architecture/tenancy.md`. Every rule below has a test or a scan that fails when it is broken.
+
+**Tenant views**
+- Route every tenant endpoint as `api/v1/r/<uuid:tenant_id>/…` (the `uuid` converter, never `str`), to a subclass of `rms.tenancy.api.views.TenantAPIView`. From 0005/0006, subclass `rms.access.api.MemberTenantAPIView` instead; until then `check_principal` is closed and every tenant request is 404, so no tenant route is mounted in `config/urls.py`.
+- Declare `permission_classes` (non-`AllowAny`) like every view.
+- Never override `dispatch`, `initial`, `resolve_active_tenant`, `check_principal` or `as_view` (they are `@final`; a scan also fails on any override outside `tests` packages and the reviewed allow-list).
+- The tenant is `self.tenant` (`ResolvedTenant`: `id`, `status`). Never read a tenant ID from the body, query string or headers.
+- The whole request runs in one transaction. A response with status ≥ 400 rolls it back, so a handler can raise or return an error after a partial write. Do not catch a database error and return a success: that becomes a 500. Never return a streaming response from a tenant view (500).
+- Services never open `tenant_transaction`; they run inside the one the view opened (or a job runner's, later) and fail with `TenantContextMissing` without it.
+
+**Tenant-owned models**
+- Inherit `rms.tenancy.data.models.TenantOwnedModel`. It provides `id` (UUID, server-generated), `tenant` (column `tenant_id`, not editable) and `UNIQUE (tenant_id, id)`. If the model declares `Meta.constraints`, start with `*TenantOwnedModel.Meta.constraints`, and subclass `TenantOwnedModel.Meta`.
+- Never add another manager, and never set `objects` to anything but `TenantManager`. Outside `tenant_transaction` every access path raises `TenantContextMissing` (this is the point). `raw()` and `extra()` raise. Do not use `connection.cursor()`, `RawSQL` or `QuerySet(model=…)` outside `rms/tenancy/data/` (scanned).
+- `id` and `tenant` are immutable: `update()`, `bulk_update()` and `save(update_fields=…)` raise if they name them, and the app role has no UPDATE on those columns. `save()` and `bulk_create()` fill `tenant` from the context and raise `TenantMismatch` for another tenant.
+- Every unique constraint and index leads with `tenant`. Uniqueness that the business defines per restaurant is `UniqueConstraint(fields=["tenant", …])`.
+- An FK to another tenant-owned model: `ForeignKey(..., db_constraint=False, db_index=False)`, an index on `(tenant, <fk>)`, and `composite_tenant_fk` in the migration. No `ManyToManyField` with an auto-created through table (use an explicit tenant-owned through model). Only the inherited `tenant` field may reference `Restaurant`; platform tables never reference tenant tables.
+- Never `select_related("tenant")` or read `tenant.created_at`/`updated_at`: the app role may read only `id`, `name` and `status` of the registry, so the query fails with "permission denied". Use `self.tenant` in views, or `obj.tenant_id`.
+- Serializers for tenant models never accept `id` or `tenant` as input (C-16). A client-chosen ID could collide with another tenant's row and reveal that it exists.
+- No sequences or identity columns on tenant tables (they are cross-tenant counters). A per-restaurant counter is designed with `data-engineer`.
+
+**Migrations for a tenant-owned table**
+- Migrations run only as the migrator (`make migrate`, `--database migrator`). In the **same migration** as the table's `CreateModel`, add (a test fails otherwise):
+
+  ```python
+  from rms.tenancy.data.rls import composite_tenant_fk, enable_tenant_rls, restrict_tenant_key_update
+
+  operations = [  # illustrative model and table names
+      migrations.CreateModel(name="Order", ...),
+      enable_tenant_rls("orders_order"),                       # ENABLE + FORCE + the tenant_isolation policy
+      restrict_tenant_key_update("Order", ["status", "note"]),  # app-role UPDATE on these columns only
+      composite_tenant_fk("orders_order", "table_id", "floor_table"),  # one per tenant-to-tenant FK
+  ]
+  ```
+- A column added later is not updatable by the app role until a migration calls `grant_update_columns("<Model>", ["<field>"])`; until then an UPDATE of it fails with "permission denied".
+- **Data migrations** over tenant data use `for_each_tenant(apps, schema_editor, fn)` in an atomic `RunPython` (the default; it raises otherwise). It calls `fn(tenant_id)` once per registry row with that tenant's context set on the migration connection. RLS is forced for the migrator too, so `fn` sees only that tenant's rows, but must still filter explicitly: `Model.objects.filter(tenant_id=tenant_id)` on the historical model.
+- Never write `set_config`, `SET app.*`, `ALTER ROLE/DATABASE … SET app.*` or libpq `-c app.*` anywhere else; a scan over `backend/` and `scripts/` allows them only in `rms/tenancy/data/context.py` and `rms/tenancy/data/rls.py`.
+- A new table without `tenant_id` must be added to the catalog check's platform allow-list (`PLATFORM_TABLES`) and the model to `PLATFORM_MODELS` (`test_models.py`): a security review item.
 
 ### Errors
 - `rms.core.api.errors` is the one place errors become responses: the DRF `EXCEPTION_HANDLER` plus Django's `handler400/403/404/500` and the CSRF failure view.
@@ -64,7 +103,7 @@
 - **Never pass a secret as a positional log argument** (`logger.info("%s", value)`): key redaction cannot see positional arguments (SC-19e). The formatter also replaces the configured secret key and DB passwords anywhere in a line, but that is the last resort, not the mechanism.
 - Only JSON-native values are serialised; other objects become their type name. Django's `request` extra becomes `{method, path}`. Request bodies are never logged.
 - `django.db.backends` never logs below WARNING, whatever `LOG_LEVEL` says, so SQL with bound parameters is never logged.
-- Per-request context lives in `rms.core.context` contextvars. Set with `token = var.set(...)` and reset with `var.reset(token)` in `finally`. `tenant_id`/`membership_id` are reserved for 0004/0005.
+- Per-request context lives in `rms.core.context` contextvars. Set with `token = var.set(...)` and reset with `var.reset(token)` in `finally`. `tenant_id` is bound by `TenantAPIView` after tenant resolution and reset inside the tenant transaction (0004); `membership_id` stays `None` until 0005.
 - The request ID is always generated server-side (UUID4). An inbound `X-Request-ID` is ignored.
 
 ### Tests
@@ -72,6 +111,12 @@
 - **Tests connect as the app role** (C3-7). In `test.py`, the `migrator` alias creates and migrates `test_rms` from `rms_template`, and `default` (app role) mirrors it. In Django 5.2 a mirror copies only `NAME`, so `default` keeps the app role's credentials. `migrator` sets `TEST["DEPENDENCIES"] = []`: otherwise Django makes it depend on `default`, which is a mirror and is never created.
 - `conftest.py` overrides `django_db_setup` to always set up both aliases, because Django applies a mirror even when its target was not set up. Without the override, `default` would point at the dev DB. After setup, conftest revokes PUBLIC's privileges on the test DB (database ACLs are not copied from a template). A session-scoped guard then aborts the whole run (exit code 3) if any check in `config/tests/db_guards.py` fails.
 - Tests declare only `default`. A test that needs the migrator connection declares `databases=["default", "migrator"]`.
-- **Planned (0004, SC-29):** Django never flushes mirror aliases, so a `TransactionTestCase`-style test that declares only `default` keeps committed rows. Transactional tests must include the `migrator` alias, or use an equivalent proven by a test.
+- **Transactional tests include `migrator` (SC-29, built in 0004).** Django never flushes a mirror alias, so a transactional test that declares only `default` would keep its committed rows. With `migrator` declared, the flush runs there, as the table owner. An autouse guard fails any transactional test (`transaction=True`, `transactional_db`, `live_server`, `django_db_serialized_rollback`, a `TransactionTestCase` that is not a `TestCase`) that omits it. No alias is serialized, so `serialized_rollback` is unavailable.
+- **Tenant data tests use the isolation harness** (`rms.tenancy.tests.harness`):
+  - Mark them `@ISOLATION_DB` (transactional, both aliases) and take the `two_tenants` fixture (tenants A and B, committed by the migrator). Context-sensitive tests must be transactional: inside a test transaction the durable `tenant_transaction` is only a savepoint, and registry rows created by the migrator are invisible to the app role.
+  - `two_tenants` first asserts that the registry is empty. Because every tenant row needs its registry row (FK) and only the migrator can create one, that proves no earlier test left tenant rows behind.
+  - Create tenant rows inside `with tenant_transaction(tenant.id):` with the factories (`make_parent`, `make_child`; `make_restaurant` for extra registry rows, e.g. suspended tenants). Each new tenant model gets its own factory next to its tests.
+  - Assert "no row" or "B unchanged" with `rows_visible_to(tenant_id, Model)` and pair it with a positive control in the same test. Never count a tenant table through the migrator without context: the policy binds the migrator too, so the answer is always 0.
+  - Every tenant endpoint gets the cross-tenant tests in `docs/architecture/tenancy.md` "Required checks".
 - pytest 9 captures non-propagating loggers too (the `django` logger does not propagate). Use `caplog` directly; do not attach `caplog.handler` by hand.
-- **Planned (0004):** factories via factory_boy.
+- Factories: factory_boy, in each context's `tests/factories.py`, with deterministic sequences (no Faker data).

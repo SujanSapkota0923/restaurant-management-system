@@ -1,7 +1,7 @@
-# RMS developer and CI entry points (change 0003, 6.6).
+# RMS developer and CI entry points (change 0003, 6.6; change 0004, 6.10).
 # CI calls the per-side targets (*-backend, *-frontend). `make check` runs all
-# checks CI runs except the DB assertions (`make db-check`); shellcheck is
-# skipped if not installed.
+# checks CI runs except the DB assertions (`make db-check`) and the dev-DB
+# catalog check (`make catalog-check`); shellcheck is skipped if not installed.
 
 SHELL := bash
 .SHELLFLAGS := -euo pipefail -c
@@ -35,7 +35,7 @@ DEPLOY_ENV := DJANGO_SETTINGS_MODULE=config.settings.production DJANGO_DEBUG=fal
 .PHONY: help setup init-env install install-backend install-frontend up down db-bootstrap db-check \
 	migrate run run-backend run-frontend lint lint-backend lint-shell lint-frontend fmt \
 	fmt-backend fmt-frontend typecheck typecheck-backend typecheck-frontend test test-backend \
-	test-frontend migrations-check deploy-check audit audit-backend audit-frontend secrets \
+	test-frontend migrations-check catalog-check migrations-roundtrip deploy-check audit audit-backend audit-frontend secrets \
 	secrets-staged secrets-dist workflow-lint build-frontend check
 
 help: ## List targets
@@ -125,8 +125,20 @@ test-backend: ## Backend tests (extra args: PYTEST_ARGS=...)
 test-frontend:
 	cd $(FRONTEND) && npm run test
 
-migrations-check: ## Fail if models and migrations are out of sync
+# Both settings: the test settings also install the test-only probe app (0004, 6.10).
+migrations-check: ## Fail if models and migrations are out of sync (local and test settings)
 	$(MANAGE) makemigrations --check --dry-run
+	$(MANAGE) makemigrations --check --dry-run --settings=config.settings.test
+
+# Read-only, as the app role, on the dev DB; needs `make migrate` first (0004, C-12(12)).
+# `make test-backend` runs the same check on the test DB, `migrations-roundtrip` on its own DB.
+catalog-check: ## Tenant-isolation catalog check on the migrated dev DB (read-only)
+	$(UV_RUN) python -m rms.tenancy.tests.catalog
+
+# Creates, migrates up/down/up and drops a throwaway DB named rms_roundtrip; it
+# refuses any other name and never touches the dev DB (0004, C-17).
+migrations-roundtrip: ## Migrate up, down to zero and up again on a throwaway DB, then the catalog check
+	$(UV_RUN) python -m config.tests.roundtrip
 
 deploy-check: ## check --deploy on production settings; must also fail with debug on
 	cd $(BACKEND) && $(DEPLOY_ENV) uv run --locked --env-file $(ENV_FILE) \
@@ -176,7 +188,9 @@ build-frontend:
 	cd $(FRONTEND) && npm run build
 
 # Serial order matters: secrets-dist scans the output of build-frontend.
-# db-check is left out: it needs the DB container and re-runs the bootstrap.
-CHECK_TARGETS := lint typecheck migrations-check test deploy-check audit secrets build-frontend \
-	secrets-dist workflow-lint
-check: $(CHECK_TARGETS) ## All checks CI runs except the DB assertions (make db-check); shellcheck is skipped if not installed
+# db-check is left out: it re-runs the bootstrap in the DB container.
+# catalog-check is left out: it needs a migrated dev DB (CI migrates its own);
+# the same check runs inside test-backend and migrations-roundtrip.
+CHECK_TARGETS := lint typecheck migrations-check migrations-roundtrip test deploy-check audit \
+	secrets build-frontend secrets-dist workflow-lint
+check: $(CHECK_TARGETS) ## All checks CI runs except db-check and catalog-check; shellcheck is skipped if not installed

@@ -362,7 +362,8 @@ def test_production_secure_defaults() -> None:
         "SECURE_CONTENT_TYPE_NOSNIFF": True,
         "USE_X_FORWARDED_HOST": False,
         "DEBUG": False,
-        "INSTALLED_APPS": ["rest_framework", "rms.core"],  # no admin, auth, sessions
+        # No admin, auth, sessions; never the test-only probe app (0004 C-18).
+        "INSTALLED_APPS": ["rest_framework", "rms.core", "rms.tenancy"],
         "SILENCED_SYSTEM_CHECKS": ["security.W021"],  # HSTS preload only
     }
 

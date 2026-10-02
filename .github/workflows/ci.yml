@@ -56,9 +56,15 @@ jobs:
         run: make lint-backend lint-shell
       - name: Type-check
         run: make typecheck-backend
-      - name: Migration check
+      - name: Migration check (local and test settings)
         run: make migrations-check
-      - name: Tests (as the app role, against PostgreSQL)
+      - name: Migrate the per-run dev DB (as the migrator)
+        run: make migrate
+      - name: Catalog check on the dev DB (read-only, as the app role)
+        run: make catalog-check
+      - name: Migration round trip on a throwaway DB (up, down to zero, up, catalog check)
+        run: make migrations-roundtrip
+      - name: Tests (as the app role, against PostgreSQL; includes the catalog check)
         run: make test-backend
       - name: Production settings check --deploy
         run: make deploy-check

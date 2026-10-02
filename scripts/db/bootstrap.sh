@@ -89,6 +89,14 @@ SELECT format('CREATE DATABASE %I OWNER %I TEMPLATE %I', :'dev_db', :'mig_role',
 WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = :'dev_db') \gexec
 REVOKE ALL ON DATABASE :"dev_db" FROM PUBLIC;
 GRANT CONNECT ON DATABASE :"dev_db" TO :"app_role", :"mig_role";
+
+-- 5. Maintenance DBs (change 0004, 6.7, C-19): PUBLIC loses CONNECT and TEMP.
+--    The migrator keeps CONNECT on postgres, where Django connects to create
+--    and drop the test and round-trip DBs. The app role needs neither. The
+--    container healthcheck (pg_isready) needs no CONNECT.
+REVOKE ALL ON DATABASE postgres FROM PUBLIC;
+GRANT CONNECT ON DATABASE postgres TO :"mig_role";
+REVOKE ALL ON DATABASE template1 FROM PUBLIC;
 SQL
 
 echo "bootstrap: roles and databases are in place."
